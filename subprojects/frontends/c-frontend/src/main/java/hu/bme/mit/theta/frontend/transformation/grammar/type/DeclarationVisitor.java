@@ -103,11 +103,18 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                         CInitializerList cInitializerList =
                                 new CInitializerList(cSimpleType.getActualType(), parseContext);
                         try {
+
+                            //Itt van amit nekünk nézni kell és tudni kezelni:
+                            //Először itt a for ciklus végigmegy az inicializálókon (itt még nincs szétválasztva hogy designatoros-e vagy mi van)
+                            //---For ciklus fejléc kezdete:
                             for (CParser.InitializerContext initializer :
                                     context.initializer()
                                             .bracedPrimaryExpression()
                                             .initializerList()
                                             .initializers) {
+                                //---For ciklus fejléc vége
+
+                                //Itt határozzuk meg a jobb oldal értékét (mod nagy számmal van)
                                 Expr<?> expr =
                                         cSimpleType
                                                 .getActualType()
@@ -116,11 +123,26 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                                                 .assignmentExpression()
                                                                 .accept(functionVisitor)
                                                                 .getExpression());
+
+                                //Ez így jónak tűnik, nem kell hozzányúlni:
                                 parseContext.getMetadata().create(expr, "cType", cSimpleType);
+
+                                //Itt adjuk hozzá az inicializáló listához (egyenlőre designatorok nélkül)
+                                //Kellene kikeresni, hogy ne null legyen, de akkor az addStatement-hez is hozzá kellene nyúlni, vagy itt megjegyezni...
+                                //Na végül hol lenne érdemes ezt a megjegyzést megoldani, nem tudom
+                                //De először működjön a designator, és majd utána a kevert mód :)
+                                //cSimpleType-nak a fields-ben vannak a mezők. Azokban kellene keresni.
+                                //ha ott van olyan, akkor ahhoz kellene létrehozni egy CSatementet, és azt átadni
+                                //Az érték pedig rendben van.
+                                //Ezen kívül meg kellene valahogy oldani az előzőt is, hogy a kevert működjön.
+                                //És kellene mindenképp hibaellenőrzés is, hogy ha nincs olyan mező, akkor exception?
+                                // TODO: hibaellenőrzésnek milyen exception
                                 cInitializerList.addStatement(
                                         null /* TODO: add designator */,
                                         new CExpr(expr, parseContext));
                             }
+
+                            //For ciklussal végig mentünk, és akkor az initializerExpr megkapja a már matematikai inicializáló listát
                             initializerExpression = cInitializerList;
                         } catch (NullPointerException e) {
                             initializerExpression =
