@@ -31,7 +31,11 @@ import hu.bme.mit.theta.frontend.transformation.model.declaration.CDeclaration;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CExpr;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CInitializerList;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CStatement;
+import hu.bme.mit.theta.frontend.transformation.model.types.complex.CComplexType;
 import hu.bme.mit.theta.frontend.transformation.model.types.simple.CSimpleType;
+import hu.bme.mit.theta.frontend.transformation.model.types.simple.Struct;
+import org.antlr.v4.runtime.tree.ParseTree;
+
 import java.util.ArrayList;
 import java.util.List;
 
@@ -93,56 +97,77 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                 CStatement initializerExpression;
                 if (context.initializer() != null && getInitExpr) {
                     if (context.initializer().bracedPrimaryExpression() != null) {
-                        checkState(
+                        /*checkState(
                                 context.initializer()
                                         .bracedPrimaryExpression()
                                         .initializerList()
                                         .designation()
                                         .isEmpty(),
-                                "Initializer list designators not yet implemented!");
+                                "Initializer list designators not yet implemented!");*/
                         CInitializerList cInitializerList =
                                 new CInitializerList(cSimpleType.getActualType(), parseContext);
                         try {
 
-                            //Itt van amit nekünk nézni kell és tudni kezelni:
-                            //Először itt a for ciklus végigmegy az inicializálókon (itt még nincs szétválasztva hogy designatoros-e vagy mi van)
-                            //---For ciklus fejléc kezdete:
-                            for (CParser.InitializerContext initializer :
+                            //Separation of code, so it can remain fast as well:
+                            //if THIS initializerList doesn't contain designator, then the original:
+                            if(context.initializer().bracedPrimaryExpression().initializerList().designation().isEmpty()){
+                                //---For loop header start without designator---//
+                                for (CParser.InitializerContext initializer :
                                     context.initializer()
-                                            .bracedPrimaryExpression()
-                                            .initializerList()
-                                            .initializers) {
-                                //---For ciklus fejléc vége
+                                        .bracedPrimaryExpression()
+                                        .initializerList()
+                                        .initializers) {
+                                    //---For loop header ending---//
 
-                                //Itt határozzuk meg a jobb oldal értékét (mod nagy számmal van)
-                                Expr<?> expr =
+                                    Expr<?> expr =
                                         cSimpleType
-                                                .getActualType()
-                                                .castTo(
-                                                        initializer
-                                                                .assignmentExpression()
-                                                                .accept(functionVisitor)
-                                                                .getExpression());
+                                            .getActualType()
+                                            .castTo(
+                                                initializer
+                                                    .assignmentExpression()
+                                                    .accept(functionVisitor)
+                                                    .getExpression());
 
-                                //Ez így jónak tűnik, nem kell hozzányúlni:
-                                parseContext.getMetadata().create(expr, "cType", cSimpleType);
+                                    parseContext.getMetadata().create(expr, "cType", cSimpleType);
 
-                                //Itt adjuk hozzá az inicializáló listához (egyenlőre designatorok nélkül)
-                                //Kellene kikeresni, hogy ne null legyen, de akkor az addStatement-hez is hozzá kellene nyúlni, vagy itt megjegyezni...
-                                //Na végül hol lenne érdemes ezt a megjegyzést megoldani, nem tudom
-                                //De először működjön a designator, és majd utána a kevert mód :)
-                                //cSimpleType-nak a fields-ben vannak a mezők. Azokban kellene keresni.
-                                //ha ott van olyan, akkor ahhoz kellene létrehozni egy CSatementet, és azt átadni
-                                //Az érték pedig rendben van.
-                                //Ezen kívül meg kellene valahogy oldani az előzőt is, hogy a kevert működjön.
-                                //És kellene mindenképp hibaellenőrzés is, hogy ha nincs olyan mező, akkor exception?
-                                // TODO: hibaellenőrzésnek milyen exception
-                                cInitializerList.addStatement(
+                                    cInitializerList.addStatement(
                                         null /* TODO: add designator */,
                                         new CExpr(expr, parseContext));
+                                }
+                            }
+                            //---If we have even one designator we have to navigate through the children of initializerList
+                            else{
+                                for(ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children){
+                                    // StateMachine logic:
+                                    // every init list with designator looks like this:
+                                    // { .y= 3.6, 123, .x =12.4 }
+                                    // With the braces we don't have to struggle now
+                                    // So now the children of initializerList should look like this as the parser does it's thing:
+                                    // [0] -> .y=   [1] -> 3.6   [2] -> ,   [3] -> 123   [4] -> ,   [5] -> .x=   [6] -> 12.4
+                                    // We have to watch out for the commas as well
+                                    // If we see a value then we can do 4 things:
+                                    // 1) there were no prior designators, then a simple assigment to the next one
+                                    // 2) there were designator but not for this--> we should see which comes
+                                    // 3) there were designator and there were no comma so the value should be assigned to the field according to the last designator
+                                    // 4) if more value than fields -> exception (TODO: ask if it needs to be addressed)
+
+                                    if(currentChild instanceof CParser.DesignationContext){
+                                        //If it is a designationContext (.xyz=) then we will trim it to xyz
+                                        String designatedField = currentChild.getText().replace(".", "").replace("=","").trim();
+                                        //Check whether it is a struct indeed
+                                        CSimpleType actType = cSimpleType.getBaseType();
+                                        checkState(actType instanceof Struct, "Designators can be used only with structs");
+                                        //Get the field from the struct
+                                        CDeclaration test = ((Struct) actType).getFields().get(designatedField);
+                                        //And then we check whether there is really a field like this in the struct
+                                        checkState(test != null, "There is no field called like " + designatedField);
+
+                                        //TODO: Now use this searched designated field :)
+                                        //TODO: We should save the designated field, in case we have mixed initList
+                                    }
+                                }
                             }
 
-                            //For ciklussal végig mentünk, és akkor az initializerExpr megkapja a már matematikai inicializáló listát
                             initializerExpression = cInitializerList;
                         } catch (NullPointerException e) {
                             initializerExpression =
