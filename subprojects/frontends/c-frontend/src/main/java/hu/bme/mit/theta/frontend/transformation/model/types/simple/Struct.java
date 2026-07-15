@@ -54,6 +54,10 @@ public class Struct extends NamedType {
         currentlyBeingBuilt = false;
     }
 
+    public Map<String, CDeclaration> getFields(){
+        return  this.fields;
+    }
+
     private Struct(Struct from) {
         super(from.parseContext, "struct", from.uniqueWarningLogger);
         fields = new LinkedHashMap<>();
