@@ -57,6 +57,9 @@ public class Struct extends NamedType {
     public Map<String, CDeclaration> getFields(){
         return  this.fields;
     }
+    public ArrayList<String> getFieldNames() {
+        return new ArrayList<>(this.fields.keySet());
+    }
 
     private Struct(Struct from) {
         super(from.parseContext, "struct", from.uniqueWarningLogger);
