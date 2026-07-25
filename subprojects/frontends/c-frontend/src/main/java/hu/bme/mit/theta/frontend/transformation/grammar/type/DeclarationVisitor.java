@@ -32,7 +32,6 @@ import hu.bme.mit.theta.frontend.transformation.model.declaration.CDeclaration;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CExpr;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CInitializerList;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CStatement;
-import hu.bme.mit.theta.frontend.transformation.model.types.complex.CComplexType;
 import hu.bme.mit.theta.frontend.transformation.model.types.simple.CSimpleType;
 import hu.bme.mit.theta.frontend.transformation.model.types.simple.Struct;
 import org.antlr.v4.runtime.tree.ParseTree;
@@ -98,18 +97,11 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                 CStatement initializerExpression;
                 if (context.initializer() != null && getInitExpr) {
                     if (context.initializer().bracedPrimaryExpression() != null) {
-                        /*checkState(
-                                context.initializer()
-                                        .bracedPrimaryExpression()
-                                        .initializerList()
-                                        .designation()
-                                        .isEmpty(),
-                                "Initializer list designators not yet implemented!");*/
                         CInitializerList cInitializerList =
                                 new CInitializerList(cSimpleType.getActualType(), parseContext);
                         try {
 
-                            //Separation of code, so it can remain fast as well:
+                            //Separation of code, so it can remain fast as well (and I don't break stuff that worked previously):
                             //if THIS initializerList doesn't contain designator, then the original:
                             if(context.initializer().bracedPrimaryExpression().initializerList().designation().isEmpty()){
                                 //---For loop header start without designator---//
@@ -140,11 +132,10 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                             else{
                                 // For indexing which field comes now:
                                 int fieldIndex = 0;
-                                CDeclaration lastDesignator = null;
-                                //Check whether it is a struct indeed
+                                // Check whether it is a struct indeed
                                 CSimpleType actType = cSimpleType.getBaseType();
                                 checkState(actType instanceof Struct, "Designators can be used only with structs");
-                                //Get the field from the struct
+                                // Get the field from the struct
                                 Struct _struct = (Struct)actType;
                                 ArrayList<String> _structFieldNames = _struct.getFieldNames();
                                 for(ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children){
@@ -158,22 +149,23 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                     // 1) there were no prior designators, then a simple assigment to the next one
                                     // 2) there were designator but not for this--> we should see which comes
                                     // 3) there were designator and there were no comma so the value should be assigned to the field according to the last designator
-                                    // 4) if more value than fields -> exception (TODO: ask if it needs to be addressed)
+                                    // 4) if more value than fields -> exception
                                     // And we can also use the indexing method so it will work
+
                                     if(currentChild instanceof CParser.DesignationContext){
-                                        //If it is a designationContext (.xyz=) then we will trim it to xyz
+                                        // If it is a designationContext (.xyz=) then we will trim it to xyz
                                         String designatedField = currentChild.getText().replace(".", "").replace("=","").trim();
                                         fieldIndex = _structFieldNames.indexOf(designatedField);
                                         boolean found = fieldIndex != -1; //Also for checking
-                                        //And then we check whether there is really a field like this in the struct
+                                        // And then we check whether there is really a field like this in the struct
                                         checkState(found, "There is no field called like " + designatedField);
                                     }
-                                    //Okay so far we checked whether it was a designator in the initList
-                                    //And if it was one, we made it work (hopefully)
-                                    //Now comes the InitialiserContext :)
+                                    // Okay so far we checked whether it was a designator in the initList
+                                    // And if it was one, we have already searched it out
+                                    // Now comes the InitialiserContext (e.g. the value)
                                     else if(currentChild instanceof CParser.InitializerContext initializer){
                                         checkState(fieldIndex < _structFieldNames.size(), "Too many initializers!");
-                                        //Copy-Paste: in theory it works
+
                                         Expr<?> expr =
                                             cSimpleType
                                                 .getActualType()
@@ -183,15 +175,13 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                                         .accept(functionVisitor)
                                                         .getExpression());
 
-                                        //This works as well in theory:
                                         parseContext.getMetadata().create(expr, "cType", cSimpleType);
 
-                                        //Now I just have to make this null into designator form :)
                                         CStatement designatorStmt = new CExpr(Int(fieldIndex), parseContext);
                                         cInitializerList.addStatement(
                                             designatorStmt,
                                             new CExpr(expr, parseContext));
-                                        //And don't forget to increment the index!
+                                        // Incrementing the designation index
                                         fieldIndex++;
                                     }
                                 }
@@ -222,8 +212,8 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
         }
         if (cSimpleType.getAssociatedName() == null
                 && initDeclContext != null
-                && initDeclContext.initDeclarator().size() > 0) {
-            ret.get(0).incDerefCounter(cSimpleType.getPointerLevel());
+                && !initDeclContext.initDeclarator().isEmpty()) {
+            ret.getFirst().incDerefCounter(cSimpleType.getPointerLevel());
         }
         return ret;
     }
@@ -258,7 +248,7 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
     @Override
     public CDeclaration visitDeclarator(CParser.DeclaratorContext ctx) {
         checkState(
-                ctx.pointer() == null || ctx.pointer().typeQualifierList().size() == 0,
+                ctx.pointer() == null || ctx.pointer().typeQualifierList().isEmpty(),
                 "pointers should not have type qualifiers! (not yet implemented)");
         // checkState(ctx.gccDeclaratorExtension().size() == 0, "Cannot do anything with
         // gccDeclaratorExtensions!");
