@@ -16,6 +16,7 @@
 package hu.bme.mit.theta.frontend.transformation.grammar.type;
 
 import static com.google.common.base.Preconditions.checkState;
+import static hu.bme.mit.theta.core.type.inttype.IntExprs.Int;
 
 import hu.bme.mit.theta.c.frontend.dsl.gen.CParser;
 import hu.bme.mit.theta.common.logging.Logger;
@@ -137,6 +138,15 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                             }
                             //---If we have even one designator we have to navigate through the children of initializerList
                             else{
+                                // For indexing which field comes now:
+                                int fieldIndex = 0;
+                                CDeclaration lastDesignator = null;
+                                //Check whether it is a struct indeed
+                                CSimpleType actType = cSimpleType.getBaseType();
+                                checkState(actType instanceof Struct, "Designators can be used only with structs");
+                                //Get the field from the struct
+                                Struct _struct = (Struct)actType;
+                                ArrayList<String> _structFieldNames = _struct.getFieldNames();
                                 for(ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children){
                                     // StateMachine logic:
                                     // every init list with designator looks like this:
@@ -144,26 +154,45 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                     // With the braces we don't have to struggle now
                                     // So now the children of initializerList should look like this as the parser does it's thing:
                                     // [0] -> .y=   [1] -> 3.6   [2] -> ,   [3] -> 123   [4] -> ,   [5] -> .x=   [6] -> 12.4
-                                    // We have to watch out for the commas as well
                                     // If we see a value then we can do 4 things:
                                     // 1) there were no prior designators, then a simple assigment to the next one
                                     // 2) there were designator but not for this--> we should see which comes
                                     // 3) there were designator and there were no comma so the value should be assigned to the field according to the last designator
                                     // 4) if more value than fields -> exception (TODO: ask if it needs to be addressed)
-
+                                    // And we can also use the indexing method so it will work
                                     if(currentChild instanceof CParser.DesignationContext){
                                         //If it is a designationContext (.xyz=) then we will trim it to xyz
                                         String designatedField = currentChild.getText().replace(".", "").replace("=","").trim();
-                                        //Check whether it is a struct indeed
-                                        CSimpleType actType = cSimpleType.getBaseType();
-                                        checkState(actType instanceof Struct, "Designators can be used only with structs");
-                                        //Get the field from the struct
-                                        CDeclaration test = ((Struct) actType).getFields().get(designatedField);
+                                        fieldIndex = _structFieldNames.indexOf(designatedField);
+                                        boolean found = fieldIndex != -1; //Also for checking
                                         //And then we check whether there is really a field like this in the struct
-                                        checkState(test != null, "There is no field called like " + designatedField);
+                                        checkState(found, "There is no field called like " + designatedField);
+                                    }
+                                    //Okay so far we checked whether it was a designator in the initList
+                                    //And if it was one, we made it work (hopefully)
+                                    //Now comes the InitialiserContext :)
+                                    else if(currentChild instanceof CParser.InitializerContext initializer){
+                                        checkState(fieldIndex < _structFieldNames.size(), "Too many initializers!");
+                                        //Copy-Paste: in theory it works
+                                        Expr<?> expr =
+                                            cSimpleType
+                                                .getActualType()
+                                                .castTo(
+                                                    initializer
+                                                        .assignmentExpression()
+                                                        .accept(functionVisitor)
+                                                        .getExpression());
 
-                                        //TODO: Now use this searched designated field :)
-                                        //TODO: We should save the designated field, in case we have mixed initList
+                                        //This works as well in theory:
+                                        parseContext.getMetadata().create(expr, "cType", cSimpleType);
+
+                                        //Now I just have to make this null into designator form :)
+                                        CStatement designatorStmt = new CExpr(Int(fieldIndex), parseContext);
+                                        cInitializerList.addStatement(
+                                            designatorStmt,
+                                            new CExpr(expr, parseContext));
+                                        //And don't forget to increment the index!
+                                        fieldIndex++;
                                     }
                                 }
                             }
