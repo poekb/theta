@@ -17,8 +17,7 @@ package hu.bme.mit.theta.frontend.transformation.grammar.function;
 
 import static com.google.common.base.Preconditions.checkState;
 import static hu.bme.mit.theta.core.decl.Decls.Var;
-import static hu.bme.mit.theta.core.type.abstracttype.AbstractExprs.Add;
-import static hu.bme.mit.theta.core.type.abstracttype.AbstractExprs.Ite;
+import static hu.bme.mit.theta.core.type.abstracttype.AbstractExprs.*;
 import static hu.bme.mit.theta.core.utils.TypeUtils.cast;
 import static hu.bme.mit.theta.grammar.UtilsKt.textWithWS;
 
@@ -31,6 +30,7 @@ import hu.bme.mit.theta.core.model.ImmutableValuation;
 import hu.bme.mit.theta.core.stmt.AssumeStmt;
 import hu.bme.mit.theta.core.type.Expr;
 import hu.bme.mit.theta.core.type.LitExpr;
+import hu.bme.mit.theta.core.type.Type;
 import hu.bme.mit.theta.core.type.abstracttype.AbstractExprs;
 import hu.bme.mit.theta.core.type.anytype.Exprs;
 import hu.bme.mit.theta.core.type.anytype.IteExpr;
@@ -583,6 +583,13 @@ public class FunctionVisitor extends IncludeHandlingCBaseVisitor<CStatement> {
                         for (Tuple2<Optional<CStatement>, CStatement> statement :
                                 initializerList.getStatements()) {
                             final var expr = statement.get2().getExpression();
+
+                            if(statement.get1().isPresent()) {
+                                CStatement offsetStmt = statement.get1().get();
+                                Expr<?> indexExpr = offsetStmt.getExpression();
+                                currentValue = cast(indexExpr, currentValue.getType()).eval(ImmutableValuation.empty());
+                            }
+
                             final var deref =
                                     Exprs.Dereference(
                                             cast(varDecl.getRef(), currentValue.getType()),
