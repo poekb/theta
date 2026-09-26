@@ -100,87 +100,56 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                         CInitializerList cInitializerList =
                                 new CInitializerList(cSimpleType.getActualType(), parseContext);
                         try {
+                            // For indexing which field comes now:
+                            int fieldIndex = 0;
+                            // Check whether it is a struct indeed
+                            CSimpleType actType = cSimpleType.getBaseType();
+                            checkState(actType instanceof Struct, "Designators can be used only with structs");
+                            // Get the field from the struct
+                            Struct _struct = (Struct) actType;
+                            ArrayList<String> _structFieldNames = _struct.getFieldNames();
+                            for (ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children) {
+                                // StateMachine logic:
+                                // every init list with designator looks like this:
+                                // { .y= 3.6, 123, .x =12.4 }
+                                // With the braces we don't have to struggle now
+                                // So now the children of initializerList should look like this as the parser does it's thing:
+                                // [0] -> .y=   [1] -> 3.6   [2] -> ,   [3] -> 123   [4] -> ,   [5] -> .x=   [6] -> 12.4
+                                // If we see a value then we can do 4 things:
+                                // 1) there were no prior designators, then a simple assigment to the next one
+                                // 2) there were designator but not for this--> we should see which comes
+                                // 3) there were designator and there were no comma so the value should be assigned to the field according to the last designator
+                                // 4) if more value than fields -> exception
+                                // And we can also use the indexing method so it will work
 
-                            //Separation of code, so it can remain fast as well (and I don't break stuff that worked previously):
-                            //if THIS initializerList doesn't contain designator, then the original:
-                            if(context.initializer().bracedPrimaryExpression().initializerList().designation().isEmpty()){
-                                //---For loop header start without designator---//
-                                for (CParser.InitializerContext initializer :
-                                    context.initializer()
-                                        .bracedPrimaryExpression()
-                                        .initializerList()
-                                        .initializers) {
-                                    //---For loop header ending---//
+                                if (currentChild instanceof CParser.DesignationContext) {
+                                    // If it is a designationContext (.xyz=) then we will trim it to xyz
+                                    String designatedField = currentChild.getText().replace(".", "").replace("=", "").trim();
+                                    fieldIndex = _structFieldNames.indexOf(designatedField);
+                                    boolean found = fieldIndex != -1; //Also for checking
+                                    // And then we check whether there is really a field like this in the struct
+                                    checkState(found, "There is no field called like " + designatedField);
+                                }
+                                // Okay so far we checked whether it was a designator in the initList
+                                // And if it was one, we have already searched it out
+                                // Now comes the InitialiserContext (e.g. the value)
+                                else if (currentChild instanceof CParser.InitializerContext initializer) {
+                                    checkState(fieldIndex < _structFieldNames.size(), "Too many initializers!");
 
-                                    Expr<?> expr =
-                                        cSimpleType
-                                            .getActualType()
-                                            .castTo(
-                                                initializer
-                                                    .assignmentExpression()
-                                                    .accept(functionVisitor)
-                                                    .getExpression());
+                                    Expr<?> expr = _struct.getFields().get(_structFieldNames.get(fieldIndex)).getActualType().castTo(initializer.assignmentExpression().accept(functionVisitor).getExpression());
 
                                     parseContext.getMetadata().create(expr, "cType", cSimpleType);
 
+                                    CStatement designatorStmt = new CExpr(Int(fieldIndex), parseContext);
                                     cInitializerList.addStatement(
-                                        null /* TODO: add designator */,
+                                        designatorStmt,
                                         new CExpr(expr, parseContext));
+                                    // Incrementing the designation index
+                                    fieldIndex++;
                                 }
                             }
-                            //---If we have even one designator we have to navigate through the children of initializerList
-                            else{
-                                // For indexing which field comes now:
-                                int fieldIndex = 0;
-                                // Check whether it is a struct indeed
-                                CSimpleType actType = cSimpleType.getBaseType();
-                                checkState(actType instanceof Struct, "Designators can be used only with structs");
-                                // Get the field from the struct
-                                Struct _struct = (Struct)actType;
-                                ArrayList<String> _structFieldNames = _struct.getFieldNames();
-                                for(ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children){
-                                    // StateMachine logic:
-                                    // every init list with designator looks like this:
-                                    // { .y= 3.6, 123, .x =12.4 }
-                                    // With the braces we don't have to struggle now
-                                    // So now the children of initializerList should look like this as the parser does it's thing:
-                                    // [0] -> .y=   [1] -> 3.6   [2] -> ,   [3] -> 123   [4] -> ,   [5] -> .x=   [6] -> 12.4
-                                    // If we see a value then we can do 4 things:
-                                    // 1) there were no prior designators, then a simple assigment to the next one
-                                    // 2) there were designator but not for this--> we should see which comes
-                                    // 3) there were designator and there were no comma so the value should be assigned to the field according to the last designator
-                                    // 4) if more value than fields -> exception
-                                    // And we can also use the indexing method so it will work
-
-                                    if(currentChild instanceof CParser.DesignationContext){
-                                        // If it is a designationContext (.xyz=) then we will trim it to xyz
-                                        String designatedField = currentChild.getText().replace(".", "").replace("=","").trim();
-                                        fieldIndex = _structFieldNames.indexOf(designatedField);
-                                        boolean found = fieldIndex != -1; //Also for checking
-                                        // And then we check whether there is really a field like this in the struct
-                                        checkState(found, "There is no field called like " + designatedField);
-                                    }
-                                    // Okay so far we checked whether it was a designator in the initList
-                                    // And if it was one, we have already searched it out
-                                    // Now comes the InitialiserContext (e.g. the value)
-                                    else if(currentChild instanceof CParser.InitializerContext initializer){
-                                        checkState(fieldIndex < _structFieldNames.size(), "Too many initializers!");
-
-                                        Expr<?> expr1 = _struct.getFields().get(_structFieldNames.get(fieldIndex)).getActualType().castTo(initializer.assignmentExpression().accept(functionVisitor).getExpression());
-
-                                        parseContext.getMetadata().create(expr1, "cType", cSimpleType);
-
-                                        CStatement designatorStmt = new CExpr(Int(fieldIndex), parseContext);
-                                        cInitializerList.addStatement(
-                                            designatorStmt,
-                                            new CExpr(expr1, parseContext));
-                                        // Incrementing the designation index
-                                        fieldIndex++;
-                                    }
-                                }
-                            }
-
                             initializerExpression = cInitializerList;
+
                         } catch (NullPointerException e) {
                             initializerExpression =
                                     new CExpr(new UnsupportedInitializer(), parseContext);
