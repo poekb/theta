@@ -166,16 +166,7 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                     else if(currentChild instanceof CParser.InitializerContext initializer){
                                         checkState(fieldIndex < _structFieldNames.size(), "Too many initializers!");
 
-                                        Expr<?> expr1 = _struct.getFields().get("a").getActualType().castTo(initializer.assignmentExpression().accept(functionVisitor).getExpression());
-
-                                        Expr<?> expr =
-                                            cSimpleType
-                                                .getActualType()
-                                                .castTo(
-                                                    initializer
-                                                        .assignmentExpression()
-                                                        .accept(functionVisitor)
-                                                        .getExpression());
+                                        Expr<?> expr1 = _struct.getFields().get(_structFieldNames.get(fieldIndex)).getActualType().castTo(initializer.assignmentExpression().accept(functionVisitor).getExpression());
 
                                         parseContext.getMetadata().create(expr1, "cType", cSimpleType);
 
