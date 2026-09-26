@@ -32,11 +32,13 @@ import hu.bme.mit.theta.frontend.transformation.model.declaration.CDeclaration;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CExpr;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CInitializerList;
 import hu.bme.mit.theta.frontend.transformation.model.statements.CStatement;
+import hu.bme.mit.theta.frontend.transformation.model.types.complex.CComplexType;
 import hu.bme.mit.theta.frontend.transformation.model.types.simple.CSimpleType;
 import hu.bme.mit.theta.frontend.transformation.model.types.simple.Struct;
 import org.antlr.v4.runtime.tree.ParseTree;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 
 public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration> {
@@ -108,6 +110,7 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                             // Get the field from the struct
                             Struct _struct = (Struct) actType;
                             ArrayList<String> _structFieldNames = _struct.getFieldNames();
+                            HashSet<Integer> _assignedFieldIndexes = new HashSet<>();
                             for (ParseTree currentChild : context.initializer().bracedPrimaryExpression().initializerList().children) {
                                 // StateMachine logic:
                                 // every init list with designator looks like this:
@@ -138,6 +141,7 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
 
                                     Expr<?> expr = _struct.getFields().get(_structFieldNames.get(fieldIndex)).getActualType().castTo(initializer.assignmentExpression().accept(functionVisitor).getExpression());
 
+                                    _assignedFieldIndexes.add(fieldIndex);
                                     parseContext.getMetadata().create(expr, "cType", cSimpleType);
 
                                     CStatement designatorStmt = new CExpr(Int(fieldIndex), parseContext);
@@ -147,6 +151,24 @@ public class DeclarationVisitor extends IncludeHandlingCBaseVisitor<CDeclaration
                                     // Incrementing the designation index
                                     fieldIndex++;
                                 }
+                            }
+                            HashSet<Integer> _notAssignedFieldIndexes = new HashSet<>();
+                            for(int i=0;i<_structFieldNames.size();i++) {
+                                if(!_assignedFieldIndexes.contains(i)){
+                                    _notAssignedFieldIndexes.add(i);
+                                }
+                            }
+                            for(int _baseValueFieldIndex : _notAssignedFieldIndexes){
+                                CComplexType fieldType = _struct.getFields().get(_structFieldNames.get(_baseValueFieldIndex)).getActualType();
+
+                                Expr<?> zeroExpr = fieldType.getNullValue();
+
+                                parseContext.getMetadata().create(zeroExpr, "cType", cSimpleType);
+
+                                CStatement designatorStmt = new CExpr(Int(_baseValueFieldIndex), parseContext);
+                                cInitializerList.addStatement(
+                                    designatorStmt,
+                                    new CExpr(zeroExpr, parseContext));
                             }
                             initializerExpression = cInitializerList;
 
