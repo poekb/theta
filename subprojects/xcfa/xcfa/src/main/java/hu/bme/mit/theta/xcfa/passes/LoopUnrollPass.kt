@@ -28,6 +28,7 @@ import hu.bme.mit.theta.xcfa.model.*
 import hu.bme.mit.theta.xcfa.utils.collectVars
 import hu.bme.mit.theta.xcfa.utils.collectVarsWithAccessType
 import hu.bme.mit.theta.xcfa.utils.getFlatLabels
+import hu.bme.mit.theta.xcfa.utils.isRead
 import hu.bme.mit.theta.xcfa.utils.isWritten
 import java.util.*
 import kotlin.math.max
@@ -81,6 +82,8 @@ class LoopUnrollPass(alwaysForceUnroll: Int = -1) : ProcedurePass {
       val c = count()
       if (c != null) {
         unroll(builder, c, true)
+      } else if (isBusyWait(builder)) {
+        unroll(builder, 1, false)
       } else if (forceUnrollLimit != -1) {
         builder.setUnsafeUnroll()
         unroll(builder, forceUnrollLimit, false)
@@ -123,6 +126,74 @@ class LoopUnrollPass(alwaysForceUnroll: Int = -1) : ProcedurePass {
           builder.addEdge(XcfaEdge(startLocation, edge.target, label, edge.metadata))
         }
       }
+    }
+
+    private fun isBusyWait(builder: XcfaProcedureBuilder): Boolean {
+      val writtenVars = loopEdges
+        .flatMap { it.collectVarsWithAccessType().filter { entry -> entry.value.isWritten }.map { it.key } }
+        .toSet()
+
+      if (writtenVars.isEmpty()) return true
+
+      val queue: ArrayDeque<Pair<XcfaLocation, Set<Any>>> = ArrayDeque()
+
+      val visited = mutableMapOf<XcfaLocation, MutableSet<Any>>()
+
+      for ((_, edges) in exitEdges) {
+        for (edge in edges) {
+          val accesses = edge.collectVarsWithAccessType()
+
+          val liveVarsAfterExit = writtenVars.filter { v -> accesses[v]?.isWritten != true }.toSet()
+
+          if (liveVarsAfterExit.isNotEmpty()) {
+            queue.add(Pair(edge.target, liveVarsAfterExit))
+          }
+        }
+      }
+
+      while (queue.isNotEmpty()) {
+        val (loc, liveVars) = queue.removeFirst()
+
+        val visitedVarsAtLoc = visited.getOrPut(loc) { mutableSetOf() }
+        val unvisitedLiveVars = liveVars.filter { it !in visitedVarsAtLoc }.toSet()
+
+        if (unvisitedLiveVars.isEmpty()) continue
+        visitedVarsAtLoc.addAll(unvisitedLiveVars)
+
+        for (out in loc.outgoingEdges) {
+          val accesses = out.collectVarsWithAccessType()
+
+          for (v in unvisitedLiveVars) {
+            if (accesses[v]?.isRead == true){
+              return false
+            }
+          }
+
+          val nextLiveVars = unvisitedLiveVars.filter { v -> accesses[v]?.isWritten != true }.toSet()
+
+          if (out.target in loopLocs) continue
+
+          if (nextLiveVars.isNotEmpty()) {
+            queue.add(Pair(out.target, nextLiveVars))
+          }
+        }
+      }
+
+      val otherProcs = builder.parent.getProcedures().filter { it != builder }
+      for (proc in otherProcs) {
+        for (edge in proc.getEdges()) {
+          val accesses = edge.collectVarsWithAccessType()
+          for (v in writtenVars) {
+
+            if (accesses[v]?.isRead == true) {
+              return false
+            }
+          }
+        }
+      }
+
+      // No outside reads of non-overwritten variables detected => busy-wait
+      return true
     }
 
     private fun count(): Int? {
