@@ -128,71 +128,104 @@ class LoopUnrollPass(alwaysForceUnroll: Int = -1) : ProcedurePass {
       }
     }
 
+//    private fun isBusyWait(builder: XcfaProcedureBuilder): Boolean {
+//      val writtenVars = loopEdges
+//        .flatMap { it.collectVarsWithAccessType().filter { entry -> entry.value.isWritten }.map { it.key } }
+//        .toSet()
+//
+//      if (writtenVars.isEmpty()) return true
+//
+//      val conditionVars = exitEdges.values.flatten()
+//        .flatMap { edge ->
+//          edge.collectVarsWithAccessType().filter { it.value.isRead }.map { it.key }
+//        }.toSet()
+//
+//      val otherProcs = builder.parent.getProcedures().filter { it != builder }
+//      for (proc in otherProcs) {
+//        for (edge in proc.getEdges()) {
+//          val accesses = edge.collectVarsWithAccessType()
+//          for (v in writtenVars) {
+//            // If another thread can access modified variables it is not a busy wait loop.
+//            if (accesses.containsKey(v)) {
+//              return false
+//            }
+//          }
+//        }
+//      }
+//
+//      val loopAndExitEdges = loopEdges + exitEdges.values.flatten()
+//      val externalEdges = builder.getEdges().filter { it !in loopAndExitEdges }
+//
+//      for (edge in externalEdges) {
+//        val accesses = edge.collectVarsWithAccessType()
+//        for (v in writtenVars) {
+//          // We can only modify variables that are used in the exit condition, otherwise it is not a busy wait loop.
+//          if (accesses[v]?.isRead == true && v !in conditionVars) {
+//            return false
+//          }
+//        }
+//      }
+//
+//      return true
+//    }
+
     private fun isBusyWait(builder: XcfaProcedureBuilder): Boolean {
+      val loopAndExitEdges = loopEdges + exitEdges.values.flatten()
+
       val writtenVars = loopEdges
         .flatMap { it.collectVarsWithAccessType().filter { entry -> entry.value.isWritten }.map { it.key } }
         .toSet()
 
       if (writtenVars.isEmpty()) return true
 
-      val queue: ArrayDeque<Pair<XcfaLocation, Set<Any>>> = ArrayDeque()
+      val conditionVars = exitEdges.values.flatten()
+        .flatMap { edge ->
+          edge.collectVarsWithAccessType().filter { it.value.isRead }.map { it.key }
+        }.toSet()
 
-      val visited = mutableMapOf<XcfaLocation, MutableSet<Any>>()
+      // 1. GLOBÁLIS MELLÉKHATÁS VIZSGÁLAT (Gyorsan!)
+      // Ha a ciklus módosít egy változót, annak LOKÁLISNAK kell lennie ehhez az eljáráshoz.
+      // Nem járjuk be a többi szálat, csak megnézzük, hogy a változó a sajátjaink között van-e.
+      val localVars = builder.getVars().toSet()
+      for (v in writtenVars) {
+        if (v !in localVars) {
+          // Globális (vagy pointer mögötti) változót ír! Ennek mellékhatása van, nem hajtható ki.
+          return false
+        }
+      }
 
-      for ((_, edges) in exitEdges) {
-        for (edge in edges) {
-          val accesses = edge.collectVarsWithAccessType()
-
-          val liveVarsAfterExit = writtenVars.filter { v -> accesses[v]?.isWritten != true }.toSet()
-
-          if (liveVarsAfterExit.isNotEmpty()) {
-            queue.add(Pair(edge.target, liveVarsAfterExit))
+      // 2. LOKÁLIS MELLÉKHATÁS VIZSGÁLAT
+      // A ciklusban módosított változók nem szivároghatnak ki a cikluson kívülre (kivéve a kilépési feltételt).
+      val externalEdges = builder.getEdges().filter { it !in loopAndExitEdges }
+      for (edge in externalEdges) {
+        val accesses = edge.collectVarsWithAccessType()
+        for (v in writtenVars) {
+          if (accesses[v]?.isRead == true && v !in conditionVars) {
+            return false
           }
         }
       }
 
-      while (queue.isNotEmpty()) {
-        val (loc, liveVars) = queue.removeFirst()
+      // 3. ÖNMAGÁTÓL VÁLTOZIK-E A FELTÉTEL? (Állapot-akkumuláció szűrése)
+      // Ha a ciklusban van egy `i = i + 1`, akkor önmagától is ki tud lépni, így nem hagyhatjuk el a futását!
+      for (edge in loopEdges) {
+        // (Az XCFA szintaxisodtól függően itt a Stmt-eken iterálunk végig, hogy lássuk az értékadásokat)
+        for (stmt in edge.getFlatLabels()) {
+          if (stmt is AssignStmt<*>) {
+            val assignedVar = stmt.varDecl
+            // Ha az értékadás bal oldala (a módosított változó) szerepel a jobb oldal
+            // kifejezésében (pl. x = x + 1), akkor a ciklus állapota determinisztikusan fejlődik.
+            val exprVars = stmt.expr.collectVars() // Vagy amilyen helper van a kifejezés változóinak lekérésére
 
-        val visitedVarsAtLoc = visited.getOrPut(loc) { mutableSetOf() }
-        val unvisitedLiveVars = liveVars.filter { it !in visitedVarsAtLoc }.toSet()
-
-        if (unvisitedLiveVars.isEmpty()) continue
-        visitedVarsAtLoc.addAll(unvisitedLiveVars)
-
-        for (out in loc.outgoingEdges) {
-          val accesses = out.collectVarsWithAccessType()
-
-          for (v in unvisitedLiveVars) {
-            if (accesses[v]?.isRead == true){
-              return false
-            }
-          }
-
-          val nextLiveVars = unvisitedLiveVars.filter { v -> accesses[v]?.isWritten != true }.toSet()
-
-          if (out.target in loopLocs) continue
-
-          if (nextLiveVars.isNotEmpty()) {
-            queue.add(Pair(out.target, nextLiveVars))
-          }
-        }
-      }
-
-      val otherProcs = builder.parent.getProcedures().filter { it != builder }
-      for (proc in otherProcs) {
-        for (edge in proc.getEdges()) {
-          val accesses = edge.collectVarsWithAccessType()
-          for (v in writtenVars) {
-
-            if (accesses[v]?.isRead == true) {
-              return false
+            if (assignedVar in exprVars) {
+              return false // Önmagától halmoz fel állapotot, nem biztonságos kihajtogatni!
             }
           }
         }
       }
 
-      // No outside reads of non-overwritten variables detected => busy-wait
+      // Ha lokálisokat ír, amik nem szivárognak ki, és nem önmagukat módosítják (idempotens),
+      // akkor ez egy tiszta várakozás vagy halott végtelen ciklus. Mindkettő kihajtható!
       return true
     }
 
