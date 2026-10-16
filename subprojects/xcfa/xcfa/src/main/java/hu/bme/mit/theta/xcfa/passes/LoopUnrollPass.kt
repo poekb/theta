@@ -21,8 +21,10 @@ import hu.bme.mit.theta.analysis.expl.ExplStmtTransFunc
 import hu.bme.mit.theta.analysis.expr.StmtAction
 import hu.bme.mit.theta.core.decl.VarDecl
 import hu.bme.mit.theta.core.model.ImmutableValuation
+import hu.bme.mit.theta.core.stmt.AssignStmt
 import hu.bme.mit.theta.core.stmt.AssumeStmt
 import hu.bme.mit.theta.core.stmt.Stmt
+import hu.bme.mit.theta.core.utils.ExprUtils
 import hu.bme.mit.theta.solver.z3.Z3SolverFactory
 import hu.bme.mit.theta.xcfa.model.*
 import hu.bme.mit.theta.xcfa.utils.collectVars
@@ -32,6 +34,11 @@ import hu.bme.mit.theta.xcfa.utils.isRead
 import hu.bme.mit.theta.xcfa.utils.isWritten
 import java.util.*
 import kotlin.math.max
+import hu.bme.mit.theta.core.stmt.HavocStmt
+import hu.bme.mit.theta.core.stmt.SkipStmt
+import hu.bme.mit.theta.core.type.Expr
+import hu.bme.mit.theta.core.type.anytype.Dereference
+import hu.bme.mit.theta.core.type.anytype.RefExpr
 
 /**
  * Unrolls loops where the number of loop executions can be determined statically. The UNROLL_LIMIT
@@ -128,105 +135,234 @@ class LoopUnrollPass(alwaysForceUnroll: Int = -1) : ProcedurePass {
       }
     }
 
-//    private fun isBusyWait(builder: XcfaProcedureBuilder): Boolean {
-//      val writtenVars = loopEdges
-//        .flatMap { it.collectVarsWithAccessType().filter { entry -> entry.value.isWritten }.map { it.key } }
-//        .toSet()
-//
-//      if (writtenVars.isEmpty()) return true
-//
-//      val conditionVars = exitEdges.values.flatten()
-//        .flatMap { edge ->
-//          edge.collectVarsWithAccessType().filter { it.value.isRead }.map { it.key }
-//        }.toSet()
-//
-//      val otherProcs = builder.parent.getProcedures().filter { it != builder }
-//      for (proc in otherProcs) {
-//        for (edge in proc.getEdges()) {
-//          val accesses = edge.collectVarsWithAccessType()
-//          for (v in writtenVars) {
-//            // If another thread can access modified variables it is not a busy wait loop.
-//            if (accesses.containsKey(v)) {
-//              return false
-//            }
-//          }
-//        }
-//      }
-//
-//      val loopAndExitEdges = loopEdges + exitEdges.values.flatten()
-//      val externalEdges = builder.getEdges().filter { it !in loopAndExitEdges }
-//
-//      for (edge in externalEdges) {
-//        val accesses = edge.collectVarsWithAccessType()
-//        for (v in writtenVars) {
-//          // We can only modify variables that are used in the exit condition, otherwise it is not a busy wait loop.
-//          if (accesses[v]?.isRead == true && v !in conditionVars) {
-//            return false
-//          }
-//        }
-//      }
-//
-//      return true
-//    }
+    private fun labelsOf(edge: XcfaEdge) = edge.label.getFlatLabels()
+
+    private class Reads(val vars: Set<VarDecl<*>>, val memory: Boolean)
+
+    private fun reads(expr: Expr<*>): Reads {
+      val vars = linkedSetOf<VarDecl<*>>()
+      var memory = false
+      fun go(e: Expr<*>) {
+        when (e) {
+          is Dereference<*, *, *> -> memory = true // the pointer itself is not a wait variable
+          is RefExpr<*> -> (e.decl as? VarDecl<*>)?.let { vars.add(it) }
+          else -> e.ops.forEach { go(it) }
+        }
+      }
+      go(expr)
+      return Reads(vars, memory)
+    }
+
+    private fun assumeReads(edge: XcfaEdge): List<Reads> =
+      labelsOf(edge)
+        .filterIsInstance<StmtLabel>()
+        .mapNotNull { l -> (l.stmt as? AssumeStmt)?.let { reads(it.cond) } }
+
+    private fun controllingGuards(edge: XcfaEdge): List<Reads> {
+      val own = assumeReads(edge)
+      if (own.isNotEmpty()) return own
+      val result = mutableListOf<Reads>()
+      val seen = hashSetOf<XcfaLocation>()
+      val work = ArrayDeque<XcfaLocation>()
+      if (seen.add(edge.source)) work.addLast(edge.source)
+      while (work.isNotEmpty()) {
+        val loc = work.removeLast()
+        for (inEdge in loc.incomingEdges) {
+          if (inEdge !in loopEdges) continue
+          val guards = assumeReads(inEdge)
+          if (guards.isNotEmpty()) result += guards
+          else if (seen.add(inEdge.source)) work.addLast(inEdge.source)
+        }
+      }
+      return result
+    }
+
+    private class Summary(val readsMemory: Boolean, val writes: Set<VarDecl<*>>, val impure: Boolean)
+
+    private fun resultVar(call: InvokeLabel): VarDecl<*>? =
+      (call.params.firstOrNull() as? RefExpr<*>)?.decl as? VarDecl<*>
+
+    private fun summaryOf(
+      name: String,
+      procs: Map<String, XcfaProcedureBuilder>,
+      cache: MutableMap<String, Summary>,
+      visiting: MutableSet<String>,
+    ): Summary {
+      cache[name]?.let {
+        return it
+      }
+      val proc = procs[name] ?: return Summary(false, emptySet(), true) // external / unknown
+      if (!visiting.add(name)) return Summary(false, emptySet(), true) // recursion
+
+      val procLocals = proc.getVars().toSet()
+      var readsMemory = false
+      var impure = false
+      val writes = mutableSetOf<VarDecl<*>>()
+      for (edge in proc.getEdges()) {
+        for (label in labelsOf(edge)) {
+          when {
+            label is InvokeLabel -> {
+              val s = summaryOf(label.name, procs, cache, visiting)
+              readsMemory = readsMemory || s.readsMemory
+              impure = impure || s.impure
+              writes += s.writes
+              resultVar(label)?.let { if (it !in procLocals) writes += it }
+            }
+            label is StmtLabel ->
+              when (val stmt = label.stmt) {
+                is AssumeStmt -> readsMemory = readsMemory || reads(stmt.cond).memory
+                is AssignStmt<*> -> {
+                  if (stmt.varDecl !in procLocals) writes += stmt.varDecl
+                  readsMemory = readsMemory || reads(stmt.expr).memory
+                }
+                is HavocStmt<*> -> if (stmt.varDecl !in procLocals) writes += stmt.varDecl
+                is SkipStmt -> {}
+                else -> impure = true
+              }
+            isNonStatement(label) -> impure = true
+          }
+        }
+      }
+      visiting.remove(name)
+      return Summary(readsMemory, writes, impure).also { cache[name] = it }
+    }
+
+    private fun writesGlobalOrMemory(
+      edge: XcfaEdge,
+      localVars: Set<VarDecl<*>>,
+      summary: (InvokeLabel) -> Summary,
+    ): Boolean =
+      labelsOf(edge).any { l ->
+        when {
+          l is InvokeLabel -> {
+            val s = summary(l)
+            s.impure || s.writes.any { it !in localVars } || (resultVar(l)?.let { it !in localVars } ?: false)
+          }
+          isNonStatement(l) -> true
+          l is StmtLabel ->
+            when (val stmt = l.stmt) {
+              is AssignStmt<*> -> stmt.varDecl !in localVars
+              is HavocStmt<*> -> stmt.varDecl !in localVars
+              is AssumeStmt, is SkipStmt -> false
+              else -> true // memory write
+            }
+          else -> false
+        }
+      }
 
     private fun isBusyWait(builder: XcfaProcedureBuilder): Boolean {
-      val loopAndExitEdges = loopEdges + exitEdges.values.flatten()
-
-      val writtenVars = loopEdges
-        .flatMap { it.collectVarsWithAccessType().filter { entry -> entry.value.isWritten }.map { it.key } }
-        .toSet()
-
-      if (writtenVars.isEmpty()) return true
-
-      val conditionVars = exitEdges.values.flatten()
-        .flatMap { edge ->
-          edge.collectVarsWithAccessType().filter { it.value.isRead }.map { it.key }
-        }.toSet()
-
-      // 1. GLOBÁLIS MELLÉKHATÁS VIZSGÁLAT (Gyorsan!)
-      // Ha a ciklus módosít egy változót, annak LOKÁLISNAK kell lennie ehhez az eljáráshoz.
-      // Nem járjuk be a többi szálat, csak megnézzük, hogy a változó a sajátjaink között van-e.
       val localVars = builder.getVars().toSet()
-      for (v in writtenVars) {
-        if (v !in localVars) {
-          // Globális (vagy pointer mögötti) változót ír! Ennek mellékhatása van, nem hajtható ki.
-          return false
-        }
+      val procs = builder.parent.getProcedures().associateBy { it.name }
+      val cache = mutableMapOf<String, Summary>()
+      val summary = { call: InvokeLabel -> summaryOf(call.name, procs, cache, mutableSetOf()) }
+
+      // 1. A pure busy wait loop must NOT write to global variables or shared memory
+      if (loopEdges.any { writesGlobalOrMemory(it, localVars, summary) }) {
+        return false
       }
 
-      // 2. LOKÁLIS MELLÉKHATÁS VIZSGÁLAT
-      // A ciklusban módosított változók nem szivároghatnak ki a cikluson kívülre (kivéve a kilépési feltételt).
-      val externalEdges = builder.getEdges().filter { it !in loopAndExitEdges }
-      for (edge in externalEdges) {
-        val accesses = edge.collectVarsWithAccessType()
-        for (v in writtenVars) {
-          if (accesses[v]?.isRead == true && v !in conditionVars) {
-            return false
-          }
+      val candidates = linkedSetOf<VarDecl<*>>()
+      var memory = false
+      for (r in guardReads()) {
+        candidates += r.vars
+        memory = memory || r.memory
+      }
+      if (candidates.isEmpty() && !memory) return false
+
+      var changed = true
+      fun absorb(src: Reads) {
+        for (v in src.vars) if (candidates.add(v)) changed = true
+        if (src.memory && !memory) {
+          memory = true
+          changed = true
         }
       }
-
-      // 3. ÖNMAGÁTÓL VÁLTOZIK-E A FELTÉTEL? (Állapot-akkumuláció szűrése)
-      // Ha a ciklusban van egy `i = i + 1`, akkor önmagától is ki tud lépni, így nem hagyhatjuk el a futását!
-      for (edge in loopEdges) {
-        // (Az XCFA szintaxisodtól függően itt a Stmt-eken iterálunk végig, hogy lássuk az értékadásokat)
-        for (stmt in edge.getFlatLabels()) {
-          if (stmt is AssignStmt<*>) {
-            val assignedVar = stmt.varDecl
-            // Ha az értékadás bal oldala (a módosított változó) szerepel a jobb oldal
-            // kifejezésében (pl. x = x + 1), akkor a ciklus állapota determinisztikusan fejlődik.
-            val exprVars = stmt.expr.collectVars() // Vagy amilyen helper van a kifejezés változóinak lekérésére
-
-            if (assignedVar in exprVars) {
-              return false // Önmagától halmoz fel állapotot, nem biztonságos kihajtogatni!
+      while (changed) {
+        changed = false
+        for (edge in loopEdges) {
+          for (label in labelsOf(edge)) {
+            if (label is InvokeLabel) {
+              val ret = resultVar(label)
+              if (ret != null && ret in candidates) {
+                if (summary(label).readsMemory) absorb(Reads(emptySet(), true))
+                label.params.drop(1).forEach { absorb(reads(it)) }
+                controllingGuards(edge).forEach { absorb(it) }
+              }
+              continue
             }
+            val stmt = (label as? StmtLabel)?.stmt as? AssignStmt<*> ?: continue
+            if (stmt.varDecl !in candidates) continue
+            val r = reads(stmt.expr)
+            if (stmt.varDecl in r.vars) {
+              // Self-accumulating variables (e.g. i = i + 1) break busy waiting
+              return false
+            }
+            absorb(r)
+            controllingGuards(edge).forEach { absorb(it) }
           }
         }
       }
 
-      // Ha lokálisokat ír, amik nem szivárognak ki, és nem önmagukat módosítják (idempotens),
-      // akkor ez egy tiszta várakozás vagy halott végtelen ciklus. Mindkettő kihajtható!
-      return true
+      val memoryBusy = memory && hasPathWithoutDefinition { definesMemory(it, summary) }
+      val busyShared =
+        candidates
+          .filter { it !in localVars }
+          .filter { v -> hasPathWithoutDefinition { definesVar(it, v, summary) } }
+      return memoryBusy || busyShared.isNotEmpty()
+    }
+
+    private fun guardReads(): List<Reads> =
+      exitEdges.keys
+        .filter { it.outgoingEdges.size >= 2 }
+        .flatMap { it.outgoingEdges }
+        .flatMap { assumeReads(it) }
+
+    private fun isNonStatement(label: XcfaLabel): Boolean =
+      label !is StmtLabel && label !is NopLabel
+
+    private fun isMemoryWrite(label: XcfaLabel): Boolean {
+      val stmt = (label as? StmtLabel)?.stmt ?: return false
+      return stmt !is AssumeStmt &&
+        stmt !is AssignStmt<*> &&
+        stmt !is HavocStmt<*> &&
+        stmt !is SkipStmt
+    }
+
+    private fun definesVar(edge: XcfaEdge, v: VarDecl<*>, summary: (InvokeLabel) -> Summary) =
+      labelsOf(edge).any { l ->
+        when {
+          l is InvokeLabel -> summary(l).let { it.impure || v in it.writes }
+          isNonStatement(l) -> true
+          l is StmtLabel ->
+            when (val stmt = l.stmt) {
+              is AssignStmt<*> -> stmt.varDecl == v
+              is HavocStmt<*> -> stmt.varDecl == v
+              else -> false
+            }
+          else -> false
+        }
+      }
+
+    private fun definesMemory(edge: XcfaEdge, summary: (InvokeLabel) -> Summary) =
+      labelsOf(edge).any { l ->
+        when {
+          l is InvokeLabel -> summary(l).impure
+          isNonStatement(l) -> true
+          else -> isMemoryWrite(l)
+        }
+      }
+
+    private fun hasPathWithoutDefinition(defines: (XcfaEdge) -> Boolean): Boolean {
+      val free = loopEdges.filter { !defines(it) }.groupBy { it.source }
+      val seen = hashSetOf(loopStart)
+      val work = ArrayDeque(listOf(loopStart))
+      while (work.isNotEmpty()) {
+        for (e in free[work.removeLast()].orEmpty()) {
+          if (e.target == loopStart) return true
+          if (seen.add(e.target)) work.addLast(e.target)
+        }
+      }
+      return false
     }
 
     private fun count(): Int? {
